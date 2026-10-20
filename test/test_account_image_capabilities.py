@@ -11,12 +11,29 @@ os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 from services.account_service import AccountService
 from services.auth_service import AuthService
 from services.config import config
-from services.openai_backend_api import InvalidAccessTokenError
+from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token, split_image_model
 
 
 class AccountCapabilityTests(unittest.TestCase):
+    def test_imported_team_workspace_is_selected_over_personal_default(self) -> None:
+        accounts = {
+            "team-workspace": {
+                "account": {"account_id": "team-workspace", "plan_type": "team", "is_deactivated": False},
+                "entitlement": {"has_active_subscription": True},
+            },
+            "default": {"account": {"account_id": "personal", "plan_type": "free"}},
+        }
+        self.assertEqual(
+            OpenAIBackendAPI._select_account_workspace(accounts, "team-workspace")["plan_type"],
+            "team",
+        )
+        self.assertEqual(
+            OpenAIBackendAPI._select_account_workspace(accounts, "missing")["plan_type"],
+            "free",
+        )
+
     def test_image_accounts_require_positive_quota(self) -> None:
         self.assertFalse(
             AccountService._is_image_account_available(

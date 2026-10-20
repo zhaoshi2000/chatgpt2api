@@ -214,6 +214,9 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+            account_id = str(self.account.get("account_id") or "").strip()
+            if account_id:
+                self.session.headers["ChatGPT-Account-ID"] = account_id
 
     def close(self) -> None:
         if getattr(self, "_closed", False):
@@ -310,6 +313,21 @@ class OpenAIBackendAPI:
             self._raise_on_error(response, path)
         return response.json()
 
+    @staticmethod
+    def _select_account_workspace(accounts: Dict[str, Any], account_id: str) -> Dict[str, Any]:
+        if account_id:
+            for entry in accounts.values():
+                if not isinstance(entry, dict):
+                    continue
+                account = entry.get("account") or {}
+                if (
+                    str(account.get("account_id") or "") == account_id
+                    and not account.get("is_deactivated")
+                ):
+                    return account
+        default = accounts.get("default") or {}
+        return default.get("account") or {}
+
     def _get_default_account(self) -> Dict[str, Any]:
         path = "/backend-api/accounts/check/v4-2023-04-27"
         response = self.session.get(self.base_url + path + "?timezone_offset_min=-480", headers=self._headers(path),
@@ -317,7 +335,10 @@ class OpenAIBackendAPI:
         if response.status_code != 200:
             self._raise_on_error(response, path)
         payload = response.json()
-        default_account = ((payload.get("accounts") or {}).get("default") or {}).get("account") or {}
+        default_account = self._select_account_workspace(
+            payload.get("accounts") or {},
+            str(self.account.get("account_id") or "").strip(),
+        )
         logger.debug({
             "event": "backend_user_info_account_payload",
             "plan_type": default_account.get("plan_type"),
