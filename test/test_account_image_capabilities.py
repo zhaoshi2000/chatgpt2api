@@ -113,6 +113,25 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(plus_token, "token-plus")
             self.assertEqual(pro_token, "token-pro")
 
+    def test_reserved_image_accounts_are_not_selected_for_other_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-j", "email": "jacquesbonddnf@mail.com", "type": "team", "quota": 120},
+                {"access_token": "token-p", "email": "pattyreidjdg@mail.com", "type": "team", "quota": 120},
+                {"access_token": "token-other", "email": "other@example.com", "type": "plus", "quota": 10},
+            ])
+            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            reserved = {"jacquesbonddnf@mail.com", "pattyreidjdg@mail.com"}
+
+            regular = service.get_available_access_token(excluded_emails=reserved)
+            service.release_image_slot(regular)
+            dedicated = service.get_available_access_token(allowed_emails=reserved)
+            service.release_image_slot(dedicated)
+
+            self.assertEqual(regular, "token-other")
+            self.assertIn(dedicated, {"token-j", "token-p"})
+
     def test_refresh_accounts_can_remove_invalid_token_without_confirmation_delay(self) -> None:
         original_value = config.data.get("auto_remove_invalid_accounts")
         config.data["auto_remove_invalid_accounts"] = True

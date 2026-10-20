@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import threading
 import time
@@ -24,6 +25,13 @@ from utils.helper import (
 )
 from utils.image_tokens import count_image_content_tokens
 from utils.log import logger
+
+IMAGE25_MODELS = frozenset({"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"})
+IMAGE25_ACCOUNT_EMAILS = frozenset(
+    email.strip().lower()
+    for email in os.getenv("IMAGE25_ACCOUNT_EMAILS", "").split(",")
+    if email.strip()
+)
 
 
 class ImageGenerationError(Exception):
@@ -1297,6 +1305,12 @@ def _generate_single_image(
     该函数在独立线程中运行，每个线程使用不同的账号，
     实现并行生图，避免串行超时阻塞。
     """
+    image25 = str(request.model or "").strip().lower() in IMAGE25_MODELS
+    if image25:
+        raise ImageGenerationError(
+            "GPT Image 2.5 is unavailable until the selected accounts have image API access",
+            status_code=503,
+        )
     # 模型返回文本而非图片的最大重试次数
     MAX_TEXT_REPLY_RETRIES = 3
     # TLS 连接错误最大重试次数
@@ -1322,6 +1336,7 @@ def _generate_single_image(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                excluded_emails=set(IMAGE25_ACCOUNT_EMAILS) if IMAGE25_ACCOUNT_EMAILS else None,
             )
         except RuntimeError as exc:
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc

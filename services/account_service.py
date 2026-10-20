@@ -152,6 +152,18 @@ class AccountService:
             return True
         return cls._normalize_source_type(account.get("source_type")) == cls._normalize_source_type(source_type)
 
+    @staticmethod
+    def _account_matches_allowed_email(account: dict, allowed_emails: set[str] | None = None) -> bool:
+        if allowed_emails is None:
+            return True
+        return str(account.get("email") or "").strip().lower() in allowed_emails
+
+    @staticmethod
+    def _account_matches_excluded_email(account: dict, excluded_emails: set[str] | None = None) -> bool:
+        if not excluded_emails:
+            return True
+        return str(account.get("email") or "").strip().lower() not in excluded_emails
+
     @classmethod
     def _account_matches_any_plan_type(cls, account: dict, plan_types: set[str] | tuple[str, ...] | None = None) -> bool:
         if not plan_types:
@@ -892,6 +904,8 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            allowed_emails: set[str] | None = None,
+            excluded_emails: set[str] | None = None,
     ) -> list[str]:
         excluded = set(excluded_tokens or set())
         return [
@@ -901,6 +915,8 @@ class AccountService:
                and self._account_matches_plan_type(item, plan_type)
                and self._account_matches_any_plan_type(item, plan_types)
                and self._account_matches_source_type(item, source_type)
+               and self._account_matches_allowed_email(item, allowed_emails)
+               and self._account_matches_excluded_email(item, excluded_emails)
                and (token := item.get("access_token") or "")
                and token not in excluded
         ]
@@ -911,11 +927,13 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            allowed_emails: set[str] | None = None,
+            excluded_emails: set[str] | None = None,
     ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, allowed_emails, excluded_emails)
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
@@ -925,15 +943,17 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            allowed_emails: set[str] | None = None,
+            excluded_emails: set[str] | None = None,
     ) -> str:
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
+                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, allowed_emails, excluded_emails):
                     raise RuntimeError(
                         f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
                         if plan_type or source_type else "no available image quota"
                     )
-                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, allowed_emails, excluded_emails)
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
@@ -958,6 +978,8 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            allowed_emails: set[str] | None = None,
+            excluded_emails: set[str] | None = None,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
@@ -972,6 +994,8 @@ class AccountService:
                 plan_type=plan_type,
                 source_type=source_type,
                 plan_types=plan_types,
+                allowed_emails=allowed_emails,
+                excluded_emails=excluded_emails,
             )
             attempted_tokens.add(access_token)
             try:
@@ -989,6 +1013,8 @@ class AccountService:
                     and self._account_matches_plan_type(account or {}, plan_type)
                     and self._account_matches_any_plan_type(account or {}, plan_types)
                     and self._account_matches_source_type(account or {}, source_type)
+                    and self._account_matches_allowed_email(account or {}, allowed_emails)
+                    and self._account_matches_excluded_email(account or {}, excluded_emails)
             ):
                 return str((account or {}).get("access_token") or access_token)
             self.release_image_slot(access_token)
@@ -1107,9 +1133,50 @@ class AccountService:
         return str(item.get("access_token") or item.get("accessToken") or "").strip()
 
     @staticmethod
+    def _sub2api_account_payload(item: dict) -> dict | None:
+        """Normalize one OpenAI OAuth account from a sub2api/AstroGate export."""
+        if not isinstance(item, dict):
+            return None
+        credentials = item.get("credentials")
+        if not isinstance(credentials, dict):
+            return None
+        if str(item.get("platform") or "").strip().lower() != "openai":
+            return None
+        if str(item.get("type") or "").strip().lower() != "oauth":
+            return None
+        access_token = str(credentials.get("access_token") or credentials.get("accessToken") or "").strip()
+        if not access_token:
+            return None
+
+        payload = {
+            "access_token": access_token,
+            "source_type": "sub2api",
+            "export_type": "sub2api",
+            "type": str(credentials.get("plan_type") or "free").strip() or "free",
+        }
+        for source_key, target_key in (
+            ("refresh_token", "refresh_token"),
+            ("id_token", "id_token"),
+            ("email", "email"),
+            ("chatgpt_user_id", "user_id"),
+            ("chatgpt_account_id", "account_id"),
+            ("organization_id", "organization_id"),
+            ("expires_at", "expires_at"),
+        ):
+            value = credentials.get(source_key)
+            if value is not None and str(value).strip():
+                payload[target_key] = str(value).strip()
+        name = str(item.get("name") or "").strip()
+        if name:
+            payload["import_name"] = name
+        return payload
+
+    @staticmethod
     def _prepare_account_payload(item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
+        if payload := AccountService._sub2api_account_payload(item):
+            return payload
         access_token = AccountService._account_payload_token(item)
         if not access_token:
             return None
