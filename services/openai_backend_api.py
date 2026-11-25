@@ -2570,10 +2570,28 @@ class OpenAIBackendAPI:
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
         images = []
         for url in urls:
-            response = self.session.get(url, timeout=120)
-            ensure_ok(response, "image_download")
-            if response.content not in images:
-                images.append(response.content)
+            for attempt in range(3):
+                try:
+                    response = self.session.get(url, timeout=180)
+                    ensure_ok(response, "image_download")
+                    content = response.content
+                    break
+                except Exception as exc:
+                    message = str(exc).lower()
+                    retryable = any(marker in message for marker in (
+                        "curl: (28)", "curl: (56)", "curl: (92)", "curl: (35)",
+                        "operation timed out", "connection closed", "connection reset",
+                    ))
+                    if not retryable or attempt == 2:
+                        raise
+                    logger.warning({
+                        "event": "image_download_retry",
+                        "attempt": attempt + 1,
+                        "error": str(exc)[:200],
+                    })
+                    time.sleep(attempt + 1)
+            if content not in images:
+                images.append(content)
         return images
 
     def stream_conversation(
